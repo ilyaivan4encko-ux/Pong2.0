@@ -1,0 +1,485 @@
+<meta name='viewport' content='width=device-width, initial-scale=1'/><!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Online Pong — P2P</title>
+<style>
+  :root{--bg:#031226;--panel:#072033;--accent:#ffd166;--muted:#9fb3c8}
+  body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:linear-gradient(#021324,#021824);color:#e6f0f6;display:flex;flex-direction:column;height:100vh}
+  .wrap{max-width:1100px;margin:10px auto;padding:12px;flex:1;display:flex;flex-direction:column;gap:12px}
+  header{display:flex;align-items:center;justify-content:space-between}
+  h1{margin:0;font-size:18px;color:var(--accent)}
+  .top{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  input,select,button{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+  button.primary{background:var(--accent);color:#031224;border:none}
+  .panel{background:linear-gradient(180deg,#05242f,#031b25);padding:10px;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.6)}
+  #canvas{display:block;background:#00141a;border-radius:8px;width:100%;height:520px;touch-action:none}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .side{display:flex;gap:8px;flex-direction:column;min-width:320px}
+  .muted{color:var(--muted);font-size:13px}
+  footer{color:var(--muted);font-size:13px;text-align:center;padding:6px}
+  textarea{width:100%;height:120px;border-radius:8px;background:transparent;color:inherit;border:1px solid rgba(255,255,255,0.04);padding:8px}
+  @media(max-width:900px){ #canvas{height:360px} .side{min-width:unset} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Online Pong — P2P</h1>
+    <div class="muted">Поддержка мобильных устройств • Автоматический сигналинг через WebSocket</div>
+  </header>
+
+  <div style="display:flex;gap:12px;align-items:flex-start">
+    <div style="flex:1">
+      <canvas id="canvas" width="1100" height="520"></canvas>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
+        <button id="btnHost" class="primary">Стать хостом</button>
+        <button id="btnClient">Подключиться как клиент</button>
+        <button id="btnDisconnect" style="background:#ff7ab6;color:#031224">Отключиться</button>
+        <div class="muted" id="roleLabel">Роль: не подключен</div>
+        <div style="margin-left:auto" class="muted">Двойной тап — старт/пауза</div>
+      </div>
+    </div>
+
+    <div class="side panel">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <label class="muted">WebSocket сигналинг (вставь URL сервера, например wss://my-signal.onrender.com)</label>
+        <input id="signalUrl" placeholder="ws://localhost:8080 или wss://..." value="ws://localhost:8080">
+        <div style="display:flex;gap:8px">
+          <input id="roomId" placeholder="room id (например pong123)" value="pong123">
+          <input id="myName" placeholder="Твоё имя" value="Player">
+        </div>
+
+        <div style="display:flex;gap:6px">
+          <button id="joinBtn">Войти в комнату</button>
+          <button id="copyPeerLink">Скопировать комнату</button>
+        </div>
+
+        <div class="muted">Инфо:</div>
+        <div class="muted" id="connState">WS: не подключён • RTC: нет</div>
+
+        <hr style="opacity:.06">
+
+        <div class="muted">Рекорды (локально)</div>
+        <div id="records" style="font-weight:700">—</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="exportSave">Экспорт</button>
+          <label for="fileImport" style="padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);cursor:pointer">Импорт</label>
+          <input id="fileImport" type="file" accept="application/json" style="display:none">
+        </div>
+
+        <hr style="opacity:.06">
+        <div class="muted">Локальные советы</div>
+        <div class="muted">1) Хост — тот, кто первым вошёл в комнату (он авторитет для мяча). 2) Если P2P не соединяется — используй Render/ngrok для доступности сигнального сервера.</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>Нужна помощь с деплоем на Render/ngrok? Прокачаю — пришлю точные шаги.</footer>
+</div>
+
+<script>
+/* =========== CLIENT PONG (P2P) ===========
+
+- Использует WebSocket сигналинг для обмена offer/answer/ice.
+- Host управляет мячом и отправляет state через DataChannel.
+- Client отправляет только input (положение своей ракетки).
+- Автосохранение рекордов в localStorage.
+
+Просто открой файл, укажи URL сигналинг-сервера (ws://localhost:8080 или wss://...) и нажми "Войти в комнату".
+*/
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W = canvas.width, H = canvas.height;
+
+function fitCanvas(){ const maxW = Math.min(window.innerWidth - 40, 1100); const ratio = W/H; const w = maxW; const h = Math.round(w/ratio); canvas.style.width = w+'px'; canvas.style.height = h+'px'; }
+fitCanvas(); window.addEventListener('resize', fitCanvas);
+
+/* UI */
+const signalUrlEl = document.getElementById('signalUrl');
+const roomEl = document.getElementById('roomId');
+const joinBtn = document.getElementById('joinBtn');
+const connState = document.getElementById('connState');
+const roleLabel = document.getElementById('roleLabel');
+const copyPeerLink = document.getElementById('copyPeerLink');
+const myNameEl = document.getElementById('myName');
+const recordsEl = document.getElementById('records');
+const exportSaveBtn = document.getElementById('exportSave');
+const fileImport = document.getElementById('fileImport');
+
+let ws = null;
+let pc = null;
+let dc = null;
+let role = 'none'; // 'host'|'client'|'local'
+let myId = null;
+let peersCount = 0;
+let connectedRTC = false;
+
+/* Game state */
+const P = {
+  pH: 120, pW: 14,
+  p1y: H/2, p2y: H/2,
+  ball: { x: W/2, y: H/2, vx: 7, vy: 3 },
+  score1: 0, score2: 0,
+  running: false
+};
+
+/* Saves */
+const SAVE_KEY = 'pong_p2p_save_v1';
+let save = { name: 'Player', records: [] };
+function loadSave(){ try{ const raw = localStorage.getItem(SAVE_KEY); if(raw) save = JSON.parse(raw); }catch(e){} myNameEl.value = save.name || 'Player'; renderRecords(); }
+function saveToStorage(){ save.name = myNameEl.value || 'Player'; localStorage.setItem(SAVE_KEY, JSON.stringify(save)); renderRecords(); }
+function renderRecords(){ recordsEl.textContent = save.records.length ? save.records.join(' | ') : '—'; }
+loadSave();
+
+/* WebSocket signaling */
+function logConn(s){ connState.textContent = s; }
+function connectWS(url){
+  if(ws && ws.readyState === WebSocket.OPEN) return ws;
+  ws = new WebSocket(url);
+  ws.onopen = ()=> logConn('WS: connected');
+  ws.onerror = ()=> logConn('WS: error');
+  ws.onclose = ()=>{ logConn('WS: closed'); };
+  ws.onmessage = async (ev)=>{
+    try{
+      const msg = JSON.parse(ev.data);
+      handleSignal(msg);
+    }catch(e){}
+  };
+  return ws;
+}
+
+/* Signaling message handler */
+async function handleSignal(msg){
+  if(msg.type === 'joined'){
+    myId = msg.yourId || myId;
+    peersCount = msg.peers || peersCount;
+    logConn(`WS: in room ${msg.room} • peers:${peersCount}`);
+    // choose role: if you're the first (peers==1) -> host; if >1 -> client connects
+    if(peersCount === 1){ role = 'host'; roleLabel.textContent = 'Роль: Хост'; }
+    else { role = 'client'; roleLabel.textContent = 'Роль: Клиент'; }
+  } else if(msg.type === 'peer-joined'){
+    peersCount++;
+    logConn(`WS: peer joined • peers:${peersCount}`);
+    // if I'm host and I detect peer joined -> initiate offer
+    if(role === 'host' && pc && (dc == null || dc.readyState !== 'open')) {
+      createOffer();
+    }
+  } else if(msg.type === 'offer'){
+    // received offer -> setRemote & answer
+    await ensurePC(false);
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    ws.send(JSON.stringify({ answer }));
+  } else if(msg.type === 'answer'){
+    if(!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+  } else if(msg.type === 'ice'){
+    if(pc && msg.candidate) {
+      try{ await pc.addIceCandidate(msg.candidate); } catch(e){ console.warn('addIce failed', e); }
+    }
+  } else if(msg.type === 'peer-left'){
+    peersCount = Math.max(0, peersCount-1);
+    logConn(`WS: peer left • peers:${peersCount}`);
+    connectedRTC = false;
+    roleLabel.textContent = 'Роль: не подключен';
+    if(pc){ try{ pc.close(); }catch(e){} pc = null; dc = null; }
+  }
+}
+
+/* Setup PeerConnection */
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+async function ensurePC(isCaller){
+  if(pc) return;
+  pc = new RTCPeerConnection(rtcConfig);
+  pc.onicecandidate = e => { if(e.candidate) ws.send(JSON.stringify({ type:'ice', candidate: e.candidate })); };
+
+  pc.onconnectionstatechange = ()=> {
+    if(pc.connectionState === 'connected'){ connectedRTC = true; logConn('RTC: connected'); roleLabel.textContent = `Роль: ${role}`; }
+    if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed'){
+      connectedRTC = false;
+      logConn('RTC: ' + pc.connectionState);
+    }
+  };
+
+  pc.ondatachannel = (ev) => {
+    dc = ev.channel;
+    setupDataChannel();
+  };
+
+  if(isCaller){
+    dc = pc.createDataChannel('game', { ordered: true });
+    setupDataChannel();
+  }
+}
+
+function setupDataChannel(){
+  if(!dc) return;
+  dc.onopen = ()=> {
+    console.log('DC open'); connectedRTC = true; logConn('RTC: datachannel open');
+    // host starts authoritative game when dc open
+    if(role === 'host'){ startHostMatch(); }
+  };
+  dc.onclose = ()=> { console.log('DC closed'); connectedRTC = false; };
+  dc.onmessage = ev => handleDCMessage(ev.data);
+}
+
+/* Messages through DataChannel
+  - client -> host: {type:'input', y, name}
+  - host -> client: {type:'state', p1y, p2y, ball, score1, score2}
+  - host -> client: {type:'start'}
+  - any -> any: {type:'chat'}
+*/
+
+function handleDCMessage(raw){
+  try{ const msg = JSON.parse(raw);
+    if(msg.type === 'input' && role === 'host'){ P.p2y = msg.y; if(msg.name) save.nameOpponent = msg.name; }
+    else if(msg.type === 'state' && role === 'client'){
+      P.p1y = msg.p1y; P.p2y = msg.p2y; P.ball = msg.ball; P.score1 = msg.score1; P.score2 = msg.score2;
+    } else if(msg.type === 'start'){
+      P.running = true;
+    } else if(msg.type === 'chat'){
+      // future
+    }
+  }catch(e){}
+}
+
+function sendDC(obj){
+  if(dc && dc.readyState === 'open') try{ dc.send(JSON.stringify(obj)); }catch(e){}
+}
+
+/* Offer/Answer creation */
+async function createOffer(){
+  await ensurePC(true);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type:'offer', offer }));
+}
+
+/* UI actions */
+joinBtn.addEventListener('click', async ()=>{
+  const url = signalUrlEl.value.trim();
+  const room = roomEl.value.trim();
+  if(!url || !room) return alert('Укажи URL сигнального сервера и room id');
+
+  connectWS(url);
+  // waiting ws open to send join
+  ws.addEventListener('open', ()=> {
+    ws.send(JSON.stringify({ join: room }));
+  });
+
+  // save name
+  save.name = myNameEl.value || 'Player';
+  saveToStorage();
+});
+
+copyPeerLink.addEventListener('click', ()=>{
+  const room = roomEl.value.trim();
+  const url = location.href.split('#')[0] + '#room=' + encodeURIComponent(room);
+  navigator.clipboard.writeText(url).then(()=> alert('Ссылка скопирована в буфер: ' + url));
+});
+
+/* Game physics (host authoritative) */
+function resetBall(dir){
+  P.ball.x = W/2; P.ball.y = H/2;
+  P.ball.vx = 6 * (dir|| (Math.random()<0.5?1:-1));
+  P.ball.vy = (Math.random()*4 - 2);
+}
+
+function hostTick(dt){
+  if(!P.running) return;
+  P.ball.x += P.ball.vx * dt;
+  P.ball.y += P.ball.vy * dt;
+
+  if(P.ball.y < 8){ P.ball.y = 8; P.ball.vy *= -1; }
+  if(P.ball.y > H-8){ P.ball.y = H-8; P.ball.vy *= -1; }
+
+  // clamp paddles
+  const half = P.pH/2;
+  P.p1y = Math.max(half, Math.min(H-half, P.p1y));
+  P.p2y = Math.max(half, Math.min(H-half, P.p2y));
+
+  // collision left paddle (x ~ 24)
+  if(P.ball.x < 40){
+    if(Math.abs(P.ball.y - P.p1y) < P.pH/2 + 8){
+      P.ball.x = 40; P.ball.vx *= -1.05;
+      const delta = (P.ball.y - P.p1y) / (P.pH/2);
+      P.ball.vy += delta * 3;
+    } else {
+      P.score2++; resetBall(1);
+      recordIfFinished();
+    }
+  }
+
+  // collision right paddle
+  if(P.ball.x > W-40){
+    if(Math.abs(P.ball.y - P.p2y) < P.pH/2 + 8){
+      P.ball.x = W-40; P.ball.vx *= -1.05;
+      const delta = (P.ball.y - P.p2y) / (P.pH/2);
+      P.ball.vy += delta * 3;
+    } else {
+      P.score1++; resetBall(-1);
+      recordIfFinished();
+    }
+  }
+
+  // send state to client
+  sendDC({ type:'state', p1y: P.p1y, p2y: P.p2y, ball: P.ball, score1: P.score1, score2: P.score2 });
+}
+
+/* Client tick: send input periodically */
+let lastInputSent = 0;
+function clientTick(dt){
+  if(!P.running) return;
+  lastInputSent += dt;
+  if(lastInputSent > 1/30){
+    lastInputSent = 0;
+    sendDC({ type:'input', y: P.p2y, name: myNameEl.value });
+  }
+}
+
+/* Rendering */
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // background
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#001a20'); g.addColorStop(1,'#001014');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+  // midline
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  for(let y=12;y<H;y+=28) ctx.fillRect(W/2 - 2, y, 4, 12);
+
+  // paddles
+  ctx.fillStyle = '#5eead4';
+  ctx.fillRect(24, P.p1y - P.pH/2, P.pW, P.pH);
+  ctx.fillRect(W - 24 - P.pW, P.p2y - P.pH/2, P.pW, P.pH);
+
+  // ball
+  ctx.beginPath(); ctx.arc(P.ball.x, P.ball.y, 8, 0, Math.PI*2);
+  ctx.fillStyle = '#ffd166'; ctx.fill();
+
+  // scores & names
+  ctx.fillStyle = '#dff6f2'; ctx.font = '42px sans-serif';
+  ctx.fillText(P.score1, W/2 - 80, 70); ctx.fillText(P.score2, W/2 + 50, 70);
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#9fb3c8';
+  ctx.fillText(save.name || 'You', 24, 32);
+  ctx.fillText(save.nameOpponent || 'Friend', W - 160, 32);
+
+  requestAnimationFrame(draw);
+}
+draw();
+
+/* Input handling - pointer/touch/keyboard
+   Host controls p1 (left), Client controls p2 (right).
+*/
+let pointerId = null;
+canvas.addEventListener('pointerdown', (e)=>{ pointerId = e.pointerId; canvas.setPointerCapture(pointerId); onPointerMove(e); });
+canvas.addEventListener('pointerup', (e)=>{ try{ canvas.releasePointerCapture(e.pointerId);}catch(e){} pointerId = null; });
+canvas.addEventListener('pointermove', onPointerMove);
+
+function onPointerMove(e){
+  const rect = canvas.getBoundingClientRect();
+  const y = ((e.clientY - rect.top) / rect.height) * H;
+  if(role === 'host' || role === 'local'){ P.p1y = y; }
+  else if(role === 'client'){ P.p2y = y; }
+}
+
+/* keyboard */
+window.addEventListener('keydown', (e)=>{
+  if(e.key === 'ArrowUp'){ if(role==='host'||role==='local') P.p1y -= 30; else P.p2y -= 30; }
+  if(e.key === 'ArrowDown'){ if(role==='host'||role==='local') P.p1y += 30; else P.p2y += 30; }
+});
+
+/* Game loop */
+let lastTime = 0;
+function loop(time){
+  if(!lastTime) lastTime = time;
+  const dt = Math.min(50, time - lastTime) / 16; // normalized
+  lastTime = time;
+
+  if(role === 'host'){
+    hostTick(dt);
+  } else if(role === 'client'){
+    clientTick(dt);
+  } else if(role === 'local'){
+    hostTick(dt); // local singleplayer
+  }
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* Start match (host authoritative) */
+function startHostMatch(){
+  P.running = true;
+  sendDC({ type:'start' });
+  // ensure ball reset
+  resetBall(Math.random()<0.5?1:-1);
+}
+
+/* allow double click/tap to toggle running */
+canvas.addEventListener('dblclick', ()=>{ P.running = !P.running; });
+
+/* record saving: store final score when either score reaches threshold OR on disconnect */
+function recordIfFinished(){
+  // save every scored match short form
+  const s = `${P.score1}:${P.score2}`;
+  save.records.unshift(s);
+  if(save.records.length > 10) save.records.length = 10;
+  saveToStorage();
+}
+
+/* Buttons handlers for host/client/disconnect */
+document.getElementById('btnHost').addEventListener('click', async ()=>{
+  const url = signalUrlEl.value.trim(); const room = roomEl.value.trim();
+  if(!url||!room) return alert('Укажи URL сигналинга и room id');
+  connectWS(url);
+  ws.addEventListener('open', ()=>{ ws.send(JSON.stringify({ join: room })); role='host'; roleLabel.textContent='Роль: Хост'; });
+  // host will create offer when peer joins (handled by peer-joined)
+});
+
+document.getElementById('btnClient').addEventListener('click', async ()=>{
+  const url = signalUrlEl.value.trim(); const room = roomEl.value.trim();
+  if(!url||!room) return alert('Укажи URL сигналинга и room id');
+  connectWS(url);
+  ws.addEventListener('open', async ()=>{ ws.send(JSON.stringify({ join: room })); role='client'; roleLabel.textContent='Роль: Клиент'; });
+});
+
+document.getElementById('btnDisconnect').addEventListener('click', ()=>{
+  if(ws) try{ ws.close(); }catch(e){} ws=null;
+  if(pc) try{ pc.close(); }catch(e){} pc=null; dc=null;
+  connectedRTC=false; role='none'; roleLabel.textContent='Роль: не подключен'; logConn('отключено');
+});
+
+/* Export / import saves */
+exportSaveBtn.addEventListener('click', ()=>{
+  const data = JSON.stringify(save, null, 2);
+  const blob = new Blob([data], { type:'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'pong-save.json'; document.body.appendChild(a); a.click(); a.remove();
+});
+
+fileImport.addEventListener('change', (ev)=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = ()=>{ try{ save = JSON.parse(r.result); saveToStorage(); alert('Импортировано'); }catch(e){ alert('Ошибка импорта'); } };
+  r.readAsText(f); ev.target.value='';
+});
+
+/* save name when changed */
+myNameEl.addEventListener('change', saveToStorage);
+
+/* On page load: if url has #room=... auto-fill */
+(function checkHash(){
+  try{
+    const h = location.hash;
+    if(h && h.startsWith('#room=')) roomEl.value = decodeURIComponent(h.slice(6));
+  }catch(e){}
+})();
+</script>
+</body>
+</html>
