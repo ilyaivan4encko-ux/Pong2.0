@@ -1,0 +1,12 @@
+<meta name='viewport' content='width=device-width, initial-scale=1'/>{
+  "name": "webrtc-signal",
+  "version": "1.0.0",
+  "main": "server.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.13.0"
+  }
+}
